@@ -1,8 +1,12 @@
-"""Unix-socket IPC between hook scripts and the daemon.
+"""IPC between hook scripts and the daemon.
 
 Protocol: line-delimited JSON, one request → one response, then close.
 
-Request shapes (`evt` field discriminates):
+Transport is pluggable via ``transport.make_transport``:
+* macOS / Linux → Unix domain socket (``/tmp/cc-buddy-bridge.sock``)
+* Windows      → TCP loopback (``127.0.0.1:48765``)
+
+Request shapes (``evt`` field discriminates):
   {"evt":"session_start","session_id":"...","transcript_path":"...","cwd":"..."}
   {"evt":"session_end","session_id":"..."}
   {"evt":"turn_begin","session_id":"...","prompt":"..."}
@@ -21,16 +25,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Optional
+
+from .transport import Transport, default_spec, make_transport
 
 log = logging.getLogger(__name__)
 
-DEFAULT_SOCKET_PATH = os.environ.get(
-    "CC_BUDDY_BRIDGE_SOCK",
-    "/tmp/cc-buddy-bridge.sock",
-)
+# Kept for back-compat: imports like ``from .ipc import DEFAULT_SOCKET_PATH``
+# in hud.py / cli.py keep working. On Windows this resolves to a TCP spec like
+# ``127.0.0.1:48765``; on POSIX to ``/tmp/cc-buddy-bridge.sock``.
+DEFAULT_SOCKET_PATH = default_spec()
 
 
 # Handler signature: async (request_dict) -> response_dict.
@@ -38,19 +42,30 @@ Handler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
 class IPCServer:
-    def __init__(self, handler: Handler, socket_path: str = DEFAULT_SOCKET_PATH) -> None:
+    """Listens on a transport, dispatches one request per connection.
+
+    ``socket_path`` is a transport spec (path or ``host:port``). Name kept for
+    back-compat; ``Daemon`` passes it through unmodified.
+    """
+
+    def __init__(self, handler: Handler, socket_path: Optional[str] = None) -> None:
         self.handler = handler
-        self.socket_path = socket_path
+        self._transport: Transport = make_transport(socket_path)
         self._server: asyncio.AbstractServer | None = None
 
+    @property
+    def address(self) -> str:
+        """Transport-specific address string for logs / errors."""
+        return self._transport.address
+
+    # Back-compat alias: existing callers / tests may still read .socket_path.
+    @property
+    def socket_path(self) -> str:
+        return self._transport.address
+
     async def start(self) -> None:
-        # Remove stale socket from a previous run.
-        p = Path(self.socket_path)
-        if p.exists():
-            p.unlink()
-        self._server = await asyncio.start_unix_server(self._on_conn, path=self.socket_path)
-        os.chmod(self.socket_path, 0o600)  # user-only
-        log.info("ipc listening at %s", self.socket_path)
+        self._server = await self._transport.start_server(self._on_conn)
+        log.info("ipc listening at %s", self._transport.address)
 
     async def serve_forever(self) -> None:
         assert self._server is not None
@@ -61,15 +76,9 @@ class IPCServer:
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
-        p = Path(self.socket_path)
-        if p.exists():
-            try:
-                p.unlink()
-            except OSError:
-                pass
+        self._transport.cleanup_stale()
 
     async def _on_conn(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        peer = writer.get_extra_info("peername")
         try:
             line = await reader.readline()
             if not line:

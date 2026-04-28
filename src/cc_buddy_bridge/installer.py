@@ -7,9 +7,10 @@ We identify our entries by a marker substring in the command string
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
+import subprocess
 import sys
-import sysconfig
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -36,7 +37,10 @@ def _python_executable() -> str:
 
 
 def _hook_command(module: str) -> str:
-    return f"{_python_executable()} -m {module}"
+    argv = [_python_executable(), "-m", module]
+    if sys.platform == "win32":
+        return subprocess.list2cmdline(argv)
+    return shlex.join(argv)
 
 
 def _is_our_entry(hook_obj: dict[str, Any]) -> bool:
@@ -82,12 +86,14 @@ def install_hooks() -> int:
         cmd = _hook_command(module)
 
         # Find or create the matcher group.
-        group = _find_matcher_group(entries, matcher)
-        if group is None:
-            group = {"hooks": []}
+        existing_group = _find_matcher_group(entries, matcher)
+        if existing_group is None:
+            group: dict[str, Any] = {"hooks": []}
             if matcher is not None:
                 group["matcher"] = matcher
             entries.append(group)
+        else:
+            group = existing_group
 
         inner = group.setdefault("hooks", [])
         # Skip if an identical cc-buddy-bridge entry already exists.
@@ -183,22 +189,30 @@ def show_status() -> int:
         if not any_installed:
             print("  no cc-buddy-bridge hooks installed")
 
-    print("\nService (macOS launchd):")
+    print("\nService:")
     try:
         from . import service
     except ImportError:
         print("  (service module unavailable)")
         return 0
+    if not service.is_supported():
+        print("  unsupported on this platform")
+        return 0
+    print(f"  backend: {service.service_kind()}")
     if not service.is_installed():
         print("  not installed (run `cc-buddy-bridge install --service` to add)")
     else:
-        loaded = "loaded" if service.is_loaded() else "installed but not loaded"
-        print(f"  {loaded}: {service.PLIST_PATH}")
-        print(f"  logs: {service.LOG_PATH}")
+        summary = service.status_summary()
+        location = service.definition_location()
+        if location is None:
+            print(f"  {summary}")
+        else:
+            print(f"  {summary}: {location}")
+        print(f"  logs: {service.log_path()}")
     return 0
 
 
-def _find_matcher_group(entries: list, matcher: str | None) -> dict | None:
+def _find_matcher_group(entries: list[Any], matcher: str | None) -> dict[str, Any] | None:
     for e in entries:
         if not isinstance(e, dict):
             continue

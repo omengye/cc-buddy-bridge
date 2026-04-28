@@ -1,24 +1,27 @@
-"""Tiny synchronous Unix-socket client used by hook scripts.
+"""Tiny synchronous transport client used by hook scripts.
 
 Hooks are short-lived subprocesses. We don't want to pay asyncio import cost
 for every tool call — a stdlib-only sync client is faster and cleaner.
 
-If the daemon is unreachable or slow, we return None so the caller can degrade
-gracefully (i.e., don't block Claude Code's normal flow).
+Transport (Unix socket vs TCP loopback) is resolved by ``transport.make_transport``;
+the socket_path argument is forwarded as a *transport spec*. On POSIX this is
+typically a path; on Windows it's ``host:port``.
+
+If the daemon is unreachable or slow, we return ``None`` so the caller can
+degrade gracefully (i.e., don't block Claude Code's normal flow).
 """
 
 from __future__ import annotations
 
 import json
-import os
-import socket
+import socket as _socket
 import sys
 from typing import Any, Optional
 
-DEFAULT_SOCKET_PATH = os.environ.get(
-    "CC_BUDDY_BRIDGE_SOCK",
-    "/tmp/cc-buddy-bridge.sock",
-)
+from ..transport import default_spec, make_transport
+
+# Back-compat for existing imports.
+DEFAULT_SOCKET_PATH = default_spec()
 
 # How long a hook is willing to wait for the daemon before giving up.
 # PreToolUse overrides this to a much larger value for the BLE round-trip.
@@ -38,16 +41,14 @@ def read_hook_input() -> dict[str, Any]:
 
 def post(
     event: dict[str, Any],
-    socket_path: str = DEFAULT_SOCKET_PATH,
+    socket_path: Optional[str] = None,
     timeout: float = DEFAULT_TIMEOUT_SECS,
 ) -> Optional[dict[str, Any]]:
     """Send one JSON event, read one JSON response, close. Returns None on any error."""
-    if not os.path.exists(socket_path):
-        return None
+    transport = make_transport(socket_path)
+    s: Optional[_socket.socket] = None
     try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(timeout)
-        s.connect(socket_path)
+        s = transport.sync_connect(timeout)
         s.sendall((json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8"))
         # Read until newline.
         buf = bytearray()
@@ -58,9 +59,14 @@ def post(
             buf.extend(chunk)
             if b"\n" in buf:
                 break
-        s.close()
-    except (OSError, socket.timeout):
+    except (OSError, _socket.timeout):
         return None
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except OSError:
+                pass
     line = bytes(buf).split(b"\n", 1)[0]
     if not line:
         return None

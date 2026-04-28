@@ -19,16 +19,19 @@ you approve or deny right from the stick's buttons.
 ## How it works
 
 ```
-claude CLI ──PreToolUse/Stop/etc hooks──▶ Unix socket ──▶ daemon ──BLE NUS──▶ stick
-                                                           ▲
-                                                           └── tails ~/.claude/projects/*.jsonl
-                                                               for tokens & recent messages
+claude CLI ──PreToolUse/Stop/etc hooks──▶ local IPC (Unix socket on POSIX / TCP loopback on Windows)
+                                          │
+                                          └──────────────────────────────▶ daemon ──BLE NUS──▶ stick
+                                                                             ▲
+                                                                             └── tails ~/.claude/projects/*.jsonl
+                                                                                 for tokens & recent messages
 ```
 
 * **Hooks** (configured in `~/.claude/settings.json`) fire on session lifecycle
   events, tool calls, permission requests, and turn boundaries.
 * Each hook is a small Python script that posts the event payload to a local
-  **daemon** over a Unix socket.
+  **daemon** over platform-native IPC: a Unix socket on macOS/Linux, TCP
+  loopback (`127.0.0.1:48765` by default) on Windows.
 * The daemon aggregates per-session state (`total` / `running` / `waiting` /
   `tokens` / `entries`) and pushes heartbeat snapshots to the stick over BLE
   Nordic UART Service, speaking the same JSON wire format as the desktop app.
@@ -39,6 +42,8 @@ See [REFERENCE.md in the buddy firmware repo](https://github.com/anthropics/clau
 for the full wire protocol.
 
 ## Install
+
+#### macOS / Linux
 
 ```bash
 git clone https://github.com/SnowWarri0r/cc-buddy-bridge
@@ -53,6 +58,21 @@ python3.12 -m venv .venv
 .venv/bin/cc-buddy-bridge daemon
 ```
 
+#### Windows (PowerShell)
+
+```powershell
+git clone https://github.com/SnowWarri0r/cc-buddy-bridge
+cd cc-buddy-bridge
+py -3.12 -m venv .venv
+.venv\Scripts\pip install -e .
+
+# Register hooks into ~/.claude\settings.json (makes a .backup copy first):
+.venv\Scripts\cc-buddy-bridge install
+
+# In another terminal, start the daemon:
+.venv\Scripts\cc-buddy-bridge daemon
+```
+
 Then start any `claude` session. The daemon scans for a BLE device advertising
 a name starting with `Claude`, connects, and begins pushing state.
 
@@ -62,7 +82,9 @@ To remove the hooks:
 .venv/bin/cc-buddy-bridge uninstall
 ```
 
-### Auto-start on login (macOS)
+### Auto-start on login
+
+#### macOS
 
 Instead of running `cc-buddy-bridge daemon` manually, install it as a
 user-level launchd agent so it starts at login and restarts on crashes:
@@ -73,8 +95,21 @@ user-level launchd agent so it starts at login and restarts on crashes:
 
 This writes `~/Library/LaunchAgents/com.github.cc-buddy-bridge.daemon.plist`
 pointed at the venv Python you just installed from, runs it immediately via
-`launchctl load`, and redirects stdout/stderr to
-`~/Library/Logs/cc-buddy-bridge.log`.
+`launchctl load`, and redirects stdout/stderr to the project log file
+(`./logs/cc-buddy-bridge.log` by default, or `CC_BUDDY_BRIDGE_LOG_DIR`).
+
+#### Windows
+
+Use the same command:
+
+```powershell
+.venv\Scripts\cc-buddy-bridge install --service
+```
+
+This creates a per-user Task Scheduler entry named
+`com.github.cc-buddy-bridge.daemon` that starts at logon and runs the daemon
+with `pythonw.exe` when available. Logs go to the project log file
+(`.\logs\cc-buddy-bridge.log` by default, or `CC_BUDDY_BRIDGE_LOG_DIR`).
 
 To remove it:
 
@@ -83,6 +118,9 @@ To remove it:
 ```
 
 `cc-buddy-bridge status` reports both hook and service status.
+
+For a full end-to-end Windows acceptance pass, see
+[`docs/windows-11-manual-validation.md`](docs/windows-11-manual-validation.md).
 
 Linux (systemd user unit) is tracked in
 [issue #4](https://github.com/SnowWarri0r/cc-buddy-bridge/issues/4); help
@@ -121,7 +159,7 @@ Sample output:
 
 ## Requirements
 
-* macOS 12+ / Linux with BlueZ (Windows untested)
+* macOS 12+ / Windows 10+ / Linux with BlueZ
 * Python 3.11+
 * A flashed claude-desktop-buddy device (M5StickC Plus)
 * Claude Code CLI
@@ -243,12 +281,12 @@ Daily-driver complete. The author runs it on every Claude Code session.
 
 * Smart matcher — auto-allow trivial Bash (`ls`/`cat`/`grep`/...), always-ask risky (`rm`/`curl`/`git push`/...), defer the rest
 * Live assistant text — JSONL tailer fires entry-emit within ~500 ms of the message hitting disk; no Stop-hook lag
-* Turn-end notification — macOS Notification Center banner + Glass sound + stick `celebrate` animation, fires the moment a turn finishes
+* Turn-end notification — macOS Notification Center banner + Glass sound, Windows system chime, plus stick `celebrate` animation
 * Status-line `hud` subcommand — emoji bar with battery progress, encryption, pending prompts; composes alongside claude-hud
 
 **Operations**
 
-* macOS launchd service — auto-start on login, restart on crash
+* macOS launchd / Windows Task Scheduler service — auto-start on login
 * Stick status polling — battery %, link encryption, fs free
 * Exponential reconnect backoff + multi-daemon guard + resilient logging
 

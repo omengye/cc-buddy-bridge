@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import logging
-import os
 import signal
-import socket
 import sys
 
 from . import __version__
 from .daemon import Daemon
-from .ipc import DEFAULT_SOCKET_PATH
+from .logging_setup import setup_logging, tail_hint
+from .transport import DEFAULT_TCP_PORT, default_spec, make_transport
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -20,8 +18,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version", action="version", version=f"cc-buddy-bridge {__version__}")
     sub = parser.add_subparsers(dest="cmd")
 
+    socket_help = (
+        f"IPC transport spec (path on POSIX, '127.0.0.1:{DEFAULT_TCP_PORT}' on Windows; "
+        f"default: {default_spec()})"
+    )
+
     p_daemon = sub.add_parser("daemon", help="Run the bridge daemon (connects to BLE device, serves hooks)")
-    p_daemon.add_argument("--socket", default=None, help="Unix socket path (default /tmp/cc-buddy-bridge.sock)")
+    p_daemon.add_argument("--socket", default=None, help=socket_help)
     p_daemon.add_argument("--device-name", default="Claude", help="BLE name prefix to match (default: Claude)")
     p_daemon.add_argument("--device-address", default=None, help="BLE address to connect to (skips scan)")
     p_daemon.add_argument("--log-level", default="INFO")
@@ -29,12 +32,12 @@ def main(argv: list[str] | None = None) -> int:
     p_install = sub.add_parser("install", help="Register hooks in ~/.claude/settings.json")
     p_install.add_argument(
         "--service", action="store_true",
-        help="Install as a macOS launchd agent (daemon auto-starts on login) instead of registering hooks",
+        help="Install the auto-start service (launchd on macOS, Task Scheduler on Windows) instead of registering hooks",
     )
     p_uninstall = sub.add_parser("uninstall", help="Remove cc-buddy-bridge hooks from ~/.claude/settings.json")
     p_uninstall.add_argument(
         "--service", action="store_true",
-        help="Remove the macOS launchd agent instead of removing hooks",
+        help="Remove the auto-start service instead of removing hooks",
     )
     sub.add_parser("status", help="Show install status")
 
@@ -43,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Print a one-line stick status summary (stdout; designed for Claude Code's statusLine)",
     )
     p_hud.add_argument("--ascii", action="store_true", help="ASCII-only output (no emoji)")
-    p_hud.add_argument("--socket", default=None, help="Unix socket path override")
+    p_hud.add_argument("--socket", default=None, help=socket_help)
 
     sub.add_parser(
         "unpair",
@@ -90,20 +93,18 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_daemon(args: argparse.Namespace) -> int:
-    logging.basicConfig(
-        level=getattr(logging, args.log_level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    log_file = setup_logging(args.log_level)
+    print(tail_hint(), file=sys.stderr)
 
-    # Refuse to start if another daemon is already listening on this socket.
+    # Refuse to start if another daemon is already listening on this transport.
     # A stale socket (file exists but nobody is accepting) is safe to remove
     # and proceed. This prevents last night's "two daemons competing for the
     # BLE connection" footgun.
-    socket_path = args.socket or DEFAULT_SOCKET_PATH
-    if _socket_in_use(socket_path):
+    transport = make_transport(args.socket)
+    if transport.is_in_use():
         print(
-            f"cc-buddy-bridge: another daemon is already listening at {socket_path}.\n"
-            f"  Stop it first, or pass --socket to use a different path.",
+            f"cc-buddy-bridge: another daemon is already listening at {transport.address}.\n"
+            f"  Stop it first, or pass --socket to use a different address.",
             file=sys.stderr,
         )
         return 2
@@ -124,6 +125,8 @@ def _run_daemon(args: argparse.Namespace) -> int:
         try:
             loop.add_signal_handler(sig, _sigterm)
         except NotImplementedError:
+            # Windows asyncio doesn't support signal handlers on the event
+            # loop; SIGINT still arrives via KeyboardInterrupt below.
             pass
 
     try:
@@ -132,6 +135,7 @@ def _run_daemon(args: argparse.Namespace) -> int:
         pass
     finally:
         loop.close()
+    _ = log_file  # silence unused warning; setup_logging side-effects matter
     return 0
 
 
@@ -182,41 +186,9 @@ def _run_unpair() -> int:
     print("'Forget This Device' to purge the cached LTK. Then the next reconnect")
     print("will prompt for a fresh 6-digit passkey (displayed on the stick).")
     print("")
-    print("Watch `tail -f ~/Library/Logs/cc-buddy-bridge.log` for the moment of truth:")
+    print(f"Watch the daemon log for the moment of truth ({tail_hint()}):")
     print("  \"stick link: ENCRYPTED (was None)\"")
     return 0
-
-
-def _socket_in_use(path: str) -> bool:
-    """True iff a process is actively accepting on ``path``.
-
-    A Unix socket file left over from a crash returns ECONNREFUSED on connect;
-    we remove the stale file and return False so the new daemon can bind.
-    """
-    if not os.path.exists(path):
-        return False
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(0.5)
-    try:
-        s.connect(path)
-    except (ConnectionRefusedError, FileNotFoundError):
-        # Stale socket file — clean up and proceed.
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-        return False
-    except OSError:
-        # Some other error (permissions, socket unreadable). Be conservative
-        # and treat as in-use so we don't clobber something.
-        return True
-    else:
-        return True
-    finally:
-        try:
-            s.close()
-        except OSError:
-            pass
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Unit tests for service.py — plist generation only.
+"""Unit tests for service_macos.py — plist generation only.
 
 Anything that shells out to ``launchctl`` is covered by manual integration
 testing (install/uninstall on a real Mac) rather than a subprocess mock, to
@@ -12,7 +12,7 @@ import sys
 
 import pytest
 
-from cc_buddy_bridge import service
+from cc_buddy_bridge import service_macos as service
 
 
 def test_plist_parses_as_valid_plist():

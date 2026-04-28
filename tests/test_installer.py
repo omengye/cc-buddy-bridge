@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -17,8 +18,8 @@ def temp_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return p
 
 
-def _baseline(extra: dict | None = None) -> dict:
-    d = {
+def _baseline(extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    d: dict[str, Any] = {
         "statusLine": {"type": "command", "command": "true"},
         "permissions": {"defaultMode": "auto"},
     }
@@ -27,8 +28,26 @@ def _baseline(extra: dict | None = None) -> dict:
     return d
 
 
-def _write(p: Path, data: dict) -> None:
+def _write(p: Path, data: dict[str, Any]) -> None:
     p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def test_hook_command_uses_shlex_join_on_posix(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(installer.sys, "platform", "darwin")
+    monkeypatch.setattr(installer, "_python_executable", lambda: "/tmp/My Env/bin/python3")
+
+    cmd = installer._hook_command("cc_buddy_bridge.hooks.stop")
+
+    assert cmd == "'/tmp/My Env/bin/python3' -m cc_buddy_bridge.hooks.stop"
+
+
+def test_hook_command_uses_windows_cmd_quoting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(installer.sys, "platform", "win32")
+    monkeypatch.setattr(installer, "_python_executable", lambda: r"C:\Program Files\Python\python.exe")
+
+    cmd = installer._hook_command("cc_buddy_bridge.hooks.stop")
+
+    assert cmd == '"C:\\Program Files\\Python\\python.exe" -m cc_buddy_bridge.hooks.stop'
 
 
 def test_install_from_scratch(temp_settings: Path) -> None:

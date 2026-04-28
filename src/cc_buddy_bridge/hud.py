@@ -15,7 +15,7 @@ import socket
 import sys
 from typing import Any, Optional
 
-from .ipc import DEFAULT_SOCKET_PATH
+from .transport import default_spec, make_transport
 
 # Bar rendering. Keep the width compact — claude-hud already fills most of
 # the statusLine, and we need to fit next to it.
@@ -56,14 +56,17 @@ def _battery_segment(pct: Optional[int], *, ascii_only: bool) -> Optional[str]:
     return f"{icon} {color}{bar}{_ANSI_RESET} {pct}%"
 
 
-def _query_state(socket_path: str, timeout: float = 0.5) -> Optional[dict[str, Any]]:
-    """Best-effort: return the daemon's state dict or None if anything fails."""
+def _query_state(spec: str, timeout: float = 0.5) -> Optional[dict[str, Any]]:
+    """Best-effort: return the daemon's state dict or None if anything fails.
+
+    ``spec`` is a transport spec (path on POSIX, ``host:port`` on Windows).
+    """
+    transport = make_transport(spec)
+    s: Optional[socket.socket] = None
+    buf = bytearray()
     try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(timeout)
-        s.connect(socket_path)
+        s = transport.sync_connect(timeout)
         s.sendall(b'{"evt":"get_state"}\n')
-        buf = bytearray()
         while True:
             chunk = s.recv(4096)
             if not chunk:
@@ -71,9 +74,14 @@ def _query_state(socket_path: str, timeout: float = 0.5) -> Optional[dict[str, A
             buf.extend(chunk)
             if b"\n" in buf:
                 break
-        s.close()
     except (OSError, socket.timeout):
         return None
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except OSError:
+                pass
     line = bytes(buf).split(b"\n", 1)[0]
     if not line:
         return None
@@ -146,7 +154,7 @@ def run(ascii_only: bool = False, socket_path: Optional[str] = None) -> int:
     except (OSError, ValueError):
         pass
 
-    path = socket_path or DEFAULT_SOCKET_PATH
-    state = _query_state(path)
+    spec = socket_path or default_spec()
+    state = _query_state(spec)
     sys.stdout.write(format_line(state, ascii_only=ascii_only) + "\n")
     return 0

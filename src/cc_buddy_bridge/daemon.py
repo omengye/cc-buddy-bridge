@@ -37,7 +37,7 @@ class Daemon:
         matchers: Optional[MatcherConfig] = None,
     ) -> None:
         self.state = State()
-        self.ipc = IPCServer(self._handle_ipc, socket_path=socket_path) if socket_path else IPCServer(self._handle_ipc)
+        self.ipc = IPCServer(self._handle_ipc, socket_path=socket_path)
         self.ble = BuddyBLE(
             on_message=self._handle_ble,
             name_prefix=device_name_prefix,
