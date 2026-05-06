@@ -182,16 +182,26 @@ The reference firmware has several sharp edges the wire protocol doesn't
 warn you about. Documenting them here so you don't re-debug them, and so
 the workarounds baked into this codebase have a visible rationale.
 
-### 1. Non-ASCII bytes crash the BLE stack
+### 1. CJK and multi-byte UTF-8 on the BLE link
 
-The 5×7 Adafruit GFX bitmap font table is ASCII-only; any byte in
-`0x80`–`0xFF` (i.e. every UTF-8 continuation byte and emoji leading
-byte) indexes past the glyph table and, in enough code paths, hard-
-resets the radio task within ~1 s of the heartbeat write.
+The firmware now ships a CJK-capable bitmap font. All BMP characters
+(U+0000–U+FFFF) — including CJK unified ideographs, fullwidth
+punctuation, and kana — render correctly. Supplementary-plane
+codepoints (U+10000+, i.e. most emoji) and lone surrogates are still
+outside the font table and would cause an out-of-range index fault.
 
-**Workaround:** `sanitize_for_stick()` in `protocol.py` rewrites
-everything outside `0x20`–`0x7E` (and tab) to `?` before sending. CJK
-users will see rows of `?` on the stick, which is lossy but stable.
+**Workaround — sanitization:** `sanitize_for_stick()` in `protocol.py`
+replaces non-BMP codepoints (emoji, etc.), lone surrogates
+(U+D800–U+DFFF), and C0/C1 control characters with `?`. BMP content,
+including Chinese, is passed through unchanged.
+
+**Workaround — BLE chunking:** BLE Write Without Response payloads are
+capped at `MTU − 3` bytes. A heartbeat with several CJK entries can
+exceed the default 20-byte ATT payload, and a naive single write
+silently truncates the data — splitting a 3-byte UTF-8 sequence mid-
+character and producing garbled glyphs. `BuddyBLE.send()` now chunks
+the encoded JSON into `MTU − 3` byte slices before writing, so no
+multi-byte sequence ever straddles a packet boundary.
 
 ### 2. `entries` wire order is oldest-first, not newest-first
 

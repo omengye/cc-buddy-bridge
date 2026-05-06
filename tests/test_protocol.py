@@ -121,21 +121,19 @@ def test_sanitize_keeps_ascii():
     assert sanitize_for_stick("hello world 123 !@#") == "hello world 123 !@#"
 
 
-def test_sanitize_strips_cjk():
-    # The firmware's bitmap font is ASCII-only; CJK bytes crash the BLE stack.
+def test_sanitize_preserves_cjk():
+    # Firmware now ships a CJK-capable font; Chinese characters must pass through.
     out = sanitize_for_stick("hello 你好 world")
-    assert "你" not in out and "好" not in out
-    assert "hello " in out and " world" in out
-    # The 2 stripped chars should each become '?' (per-codepoint).
-    assert out.count("?") == 2
+    assert "你" in out and "好" in out
+    assert out == "hello 你好 world"
 
 
-def test_sanitize_strips_bmp_symbols():
-    # Even innocuous BMP symbols like › and ✓ aren't safe — no ASCII glyph.
+def test_sanitize_preserves_bmp_symbols():
+    # BMP symbols (U+0000–U+FFFF) are renderable with the new font.
     out = sanitize_for_stick("› done ✓")
-    assert "›" not in out
-    assert "✓" not in out
-    assert "done" in out
+    assert "›" in out
+    assert "✓" in out
+    assert out == "› done ✓"
 
 
 def test_sanitize_strips_emoji():

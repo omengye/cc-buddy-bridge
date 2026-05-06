@@ -25,7 +25,9 @@ HEARTBEAT_KEEPALIVE = 10.0
 TURN_EVENT_MAX_BYTES = 4096
 
 # Max chars per entry — keep the stick's line buffer happy.
-ENTRY_TEXT_MAX = 80
+# CJK characters are 3 bytes each in UTF-8; use a conservative limit so
+# mixed Chinese/ASCII content doesn't blow the MTU budget.
+ENTRY_TEXT_MAX = 40
 
 # Replacement character used when we strip a codepoint the stick can't render.
 # Keep it to 1 ASCII char so it doesn't blow up byte budgets or fall into the
@@ -141,36 +143,28 @@ class LineAssembler:
 # ---- sanitization ----
 
 def sanitize_for_stick(text: str) -> str:
-    """Strip anything the stick's bitmap font can't safely render.
+    """Strip characters the stick's font can't safely render.
 
-    Initially we thought we only had to drop supplementary-plane codepoints
-    (emojis), because BMP chars like CJK "just rendered as empty boxes".
-    Empirical testing (2026-04-22) showed that's wrong: pushing entries
-    containing CJK UTF-8 bytes (``0xE9 0x87 0x8D`` for "重" etc.) reliably
-    disconnected the stick ~1s after the heartbeat write.
-
-    Hypothesis: the firmware's Adafruit-GFX bitmap font table is ASCII-only,
-    so a multi-byte leading byte (0x80–0xFF) becomes an out-of-range index —
-    garbage reads in some paths, a hard fault in others. Either way, anything
-    non-ASCII is a poison pill.
-
-    Policy: keep only ASCII printable (``0x20``–``0x7E``) plus tab. Strip
-    everything else — control chars, high-bit bytes, CJK, fullwidth punct,
-    emojis — to '?'. Stable takes priority over expressiveness; a Chinese
-    entry becomes a row of '?'s which at least tells the viewer "something
-    happened".
+    Firmware now ships a CJK-capable font, so BMP characters (U+0000–U+FFFF)
+    including CJK unified ideographs, fullwidth punctuation, and kana are all
+    renderable. We still strip:
+      - C0/C1 control characters (except tab) — no glyph, undefined behaviour
+      - Supplementary-plane codepoints (U+10000+) such as emoji — font table
+        only covers BMP; these would still cause an out-of-range index fault
     """
     if not text:
         return text
     out = []
     for ch in text:
         cp = ord(ch)
-        if 0x20 <= cp <= 0x7E:
-            out.append(ch)
-        elif ch == "\t":
-            out.append(ch)
-        else:
+        if cp > 0xFFFF:
             out.append(UNRENDERABLE_REPLACEMENT)
+        elif 0xD800 <= cp <= 0xDFFF:
+            out.append(UNRENDERABLE_REPLACEMENT)
+        elif cp < 0x20 and ch != "\t":
+            out.append(UNRENDERABLE_REPLACEMENT)
+        else:
+            out.append(ch)
     return "".join(out)
 
 

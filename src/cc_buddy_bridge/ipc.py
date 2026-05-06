@@ -103,6 +103,6 @@ class IPCServer:
 
     @staticmethod
     async def _reply(writer: asyncio.StreamWriter, obj: dict[str, Any]) -> None:
-        data = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
+        data = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8", errors="replace")
         writer.write(data)
         await writer.drain()

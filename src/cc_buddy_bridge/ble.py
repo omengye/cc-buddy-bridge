@@ -74,8 +74,13 @@ class BuddyBLE:
         data = encode(obj)
         try:
             async with self._send_lock:
-                # Write without response for throughput. MTU-sized chunks if needed.
-                await self._client.write_gatt_char(NUS_RX_UUID, data, response=False)
+                # ATT Write Without Response payload = MTU - 3 bytes overhead.
+                # Chunk so multi-byte UTF-8 sequences never straddle a packet boundary.
+                chunk_size = max(20, self._client.mtu_size - 3)
+                for offset in range(0, len(data), chunk_size):
+                    await self._client.write_gatt_char(
+                        NUS_RX_UUID, data[offset : offset + chunk_size], response=False
+                    )
             return True
         except Exception as e:  # noqa: BLE001
             log.warning("ble send failed: %s", e)

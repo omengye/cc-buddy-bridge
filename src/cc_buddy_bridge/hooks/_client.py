@@ -28,13 +28,24 @@ DEFAULT_SOCKET_PATH = default_spec()
 DEFAULT_TIMEOUT_SECS = 3.0
 
 
+def _clean(obj: Any) -> Any:
+    """Recursively replace lone surrogates in strings so downstream code stays clean."""
+    if isinstance(obj, str):
+        return obj.encode("utf-8", errors="replace").decode("utf-8")
+    if isinstance(obj, dict):
+        return {k: _clean(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_clean(v) for v in obj]
+    return obj
+
+
 def read_hook_input() -> dict[str, Any]:
     """Read Claude Code's JSON hook payload from stdin."""
     data = sys.stdin.read()
     if not data:
         return {}
     try:
-        return json.loads(data)
+        return _clean(json.loads(data))
     except ValueError:
         return {}
 
