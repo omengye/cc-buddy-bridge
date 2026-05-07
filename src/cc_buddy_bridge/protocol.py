@@ -24,10 +24,10 @@ HEARTBEAT_KEEPALIVE = 10.0
 # Size cap for turn events per REFERENCE.md (4KB after UTF-8 encoding).
 TURN_EVENT_MAX_BYTES = 4096
 
-# Max chars per entry — keep the stick's line buffer happy.
-# CJK characters are 3 bytes each in UTF-8; use a conservative limit so
-# mixed Chinese/ASCII content doesn't blow the MTU budget.
-ENTRY_TEXT_MAX = 40
+# Max UTF-8 bytes for the text portion of each entry (before the "HH:MM " prefix).
+# CJK characters are 3 bytes each, so 60 bytes ≈ 20 CJK chars or 60 ASCII chars.
+# Enforced in bytes (not chars) so the firmware's line buffer never overflows.
+ENTRY_MAX_BYTES = 60
 
 # Replacement character used when we strip a codepoint the stick can't render.
 # Keep it to 1 ASCII char so it doesn't blow up byte budgets or fall into the
@@ -64,7 +64,7 @@ def build_heartbeat(state: State, msg: Optional[str] = None) -> dict[str, Any]:
         snapshot["prompt"] = {
             "id": pending.tool_use_id,  # tool_use_id is ASCII by construction
             "tool": sanitize_for_stick(pending.tool_name),
-            "hint": sanitize_for_stick(pending.hint[:120]),
+            "hint": sanitize_for_stick(_truncate_utf8_bytes(pending.hint, 60)),
         }
     return snapshot
 
@@ -174,9 +174,28 @@ def _format_entry(at: float, text: str) -> str:
     # Format: "HH:MM text" — REFERENCE.md shows "10:42 git push".
     hhmm = datetime.fromtimestamp(at).strftime("%H:%M")
     text = text.replace("\n", " ").strip()
-    if len(text) > ENTRY_TEXT_MAX:
-        text = text[: ENTRY_TEXT_MAX - 1] + "…"
-    return f"{hhmm} {text}"
+    return f"{hhmm} {_truncate_utf8_bytes(text, ENTRY_MAX_BYTES)}"
+
+
+def _truncate_utf8_bytes(text: str, max_bytes: int) -> str:
+    """Truncate text so its UTF-8 encoding fits within max_bytes, appending '…' if cut.
+
+    Truncates at a codepoint boundary so no Chinese character is split.
+    '…' is 3 bytes; budget is reduced accordingly before slicing.
+    """
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    budget = max_bytes - 3  # reserve space for '…' (3 UTF-8 bytes)
+    if budget <= 0:
+        return "…"
+    end = budget
+    # If the byte right after the cut is a continuation byte (10xxxxxx), the
+    # boundary falls mid-codepoint. Walk back to the lead byte of that
+    # incomplete sequence and exclude the whole codepoint.
+    while end > 0 and (encoded[end] & 0b1100_0000) == 0b1000_0000:
+        end -= 1
+    return encoded[:end].decode("utf-8") + "…"
 
 
 def _default_msg(state: State, pending) -> str:

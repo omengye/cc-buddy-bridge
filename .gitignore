@@ -12,4 +12,6 @@ logs/
 .DS_Store
 /tmp/
 .omc/
+.opencode/
+.claude/
 .sisyphus/

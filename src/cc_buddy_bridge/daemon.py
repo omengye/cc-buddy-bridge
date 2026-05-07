@@ -203,19 +203,20 @@ class Daemon:
                 self._deferred_turn_end(session_id, delay=15.0)
             )
             # Trigger the firmware's celebrate animation for a few seconds.
-            # Force-push so the heartbeat carrying completed=true reaches the
-            # stick within ~50ms of the turn ending — animation lines up with
-            # the visual change in the terminal. Schedule a follow-up push at
-            # the pulse end so the animation stops exactly on time instead of
-            # waiting up to ~10s for the next keepalive.
+            # Set the pulse state synchronously so the heartbeat snapshot is
+            # correct before anything is pushed.
             CELEBRATE_SECS = 5.0
             self.state.pulse_completed(duration_secs=CELEBRATE_SECS)
-            await self._push_heartbeat(force=True)
-            asyncio.create_task(self._heartbeat_after(CELEBRATE_SECS + 0.1))
-            # macOS-side banner + sound for when the user has tabbed away.
-            from .notifier import notify_turn_complete
+            # Capture the subtitle now, while entries are stable, so the
+            # background task doesn't race against state mutations.
             subtitle = self.state.entries[0].text[:80] if self.state.entries else ""
-            notify_turn_complete(subtitle=subtitle, session_id=session_id)
+            # Kick off the BLE push + notification in the background so this
+            # coroutine can return {"ok": True} immediately — the Stop hook
+            # caller must not block on _push_heartbeat(force=True) or it
+            # surfaces as ETIMEDOUT in the plugin's spawnSync call.
+            asyncio.create_task(
+                self._turn_end_side_effects(session_id, subtitle, CELEBRATE_SECS)
+            )
             return {"ok": True}
 
         if evt == "pretooluse":
@@ -439,6 +440,35 @@ class Daemon:
         log.info("tailer: new assistant text → entry added (state.entries=%d)",
                  len(self.state.entries))
         await self._push_heartbeat(force=True)
+
+    async def _turn_end_side_effects(
+        self, session_id: str, subtitle: str, celebrate_secs: float
+    ) -> None:
+        """Post-response work for a turn_end event, run as a background task.
+
+        Ordering mirrors what the inline handler used to do, but now executes
+        *after* the IPC ``{"ok": True}`` reply has already been sent, so the
+        Stop hook's spawnSync call never waits on a BLE write or OS notification.
+
+        1. Force-push the heartbeat carrying ``completed=true`` so the stick's
+           celebrate animation fires within ~50 ms of the turn ending.
+        2. Schedule a follow-up push at pulse end so ``completed`` flips back
+           to false on time rather than waiting for the next keepalive.
+        3. Fire the desktop notification (macOS banner + sound, Windows chime).
+        """
+        try:
+            # 1. Force heartbeat — animation timing depends on this being fast.
+            await self._push_heartbeat(force=True)
+        except Exception:  # noqa: BLE001
+            log.exception("turn_end side effects: _push_heartbeat(force=True) failed")
+        # 2. Schedule pulse-end heartbeat regardless of whether step 1 succeeded.
+        asyncio.create_task(self._heartbeat_after(celebrate_secs + 0.1))
+        # 3. Desktop notification — errors must not propagate back to the IPC loop.
+        try:
+            from .notifier import notify_turn_complete
+            notify_turn_complete(subtitle=subtitle, session_id=session_id)
+        except Exception:  # noqa: BLE001
+            log.exception("turn_end side effects: notify_turn_complete failed")
 
     async def _heartbeat_after(self, delay: float) -> None:
         """Schedule one heartbeat push after ``delay`` seconds. Used by the

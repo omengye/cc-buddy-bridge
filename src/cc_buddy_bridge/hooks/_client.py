@@ -41,9 +41,13 @@ def _clean(obj: Any) -> Any:
 
 def read_hook_input() -> dict[str, Any]:
     """Read Claude Code's JSON hook payload from stdin."""
-    data = sys.stdin.read()
-    if not data:
+    # Force UTF-8 regardless of the Windows console encoding (cp936/GBK).
+    # Claude Code writes UTF-8 JSON; sys.stdin in text mode uses the locale
+    # encoding on Windows, which silently produces Mojibake for CJK content.
+    raw = sys.stdin.buffer.read()
+    if not raw:
         return {}
+    data = raw.decode("utf-8", errors="replace")
     try:
         return _clean(json.loads(data))
     except ValueError:
